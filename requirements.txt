@@ -1,2 +1,5 @@
 Django>=5.2,<6.0
 xhtml2pdf>=0.2.17
+dj-database-url>=2.3,<3.0
+psycopg[binary]>=3.2,<4.0
+whitenoise>=6.9,<7.0

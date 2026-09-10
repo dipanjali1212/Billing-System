@@ -229,6 +229,35 @@ Billing-System/
 - Before production deployment, move the secret key into environment variables, configure `ALLOWED_HOSTS`, disable debug mode, configure static files, and use a production WSGI/ASGI server.
 - Do not commit passwords, secret keys, virtual environments, or production database files.
 
+## Deploy to Vercel
+
+The project includes a Vercel serverless entry point in `api/index.py` and a
+`vercel.json` configuration. Install the Vercel CLI, log in, and deploy from
+the directory containing `manage.py`:
+
+```bash
+npm install -g vercel
+vercel login
+vercel
+```
+
+Set these environment variables in the Vercel project settings for production:
+
+- `DJANGO_SECRET_KEY`: a new random secret key
+- `DJANGO_DEBUG`: `false`
+- `DJANGO_ALLOWED_HOSTS`: your Vercel hostname, such as `your-app.vercel.app`
+- `DJANGO_CSRF_TRUSTED_ORIGINS`: `https://your-app.vercel.app`
+- `DATABASE_URL`: a hosted PostgreSQL connection string
+
+Run migrations against the hosted database before using the application:
+
+```bash
+python manage.py migrate
+```
+
+SQLite remains the local-development default, but it should not be used for
+production data on Vercel because serverless filesystems are ephemeral.
+
 ## License
 
 This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
