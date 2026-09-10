@@ -9,55 +9,6 @@ from django.views.decorators.http import require_POST
 import json
 import datetime
 from decimal import Decimal
-
-# -----------------------------------
-# HOME VIEW (DASHBOARD)
-# -----------------------------------
-def home(request):
-    total_customers = Customer.objects.count()
-    total_products = Product.objects.count()
-    total_invoices = Invoice.objects.count()
-    
-    # Total revenue is the sum of actual cash/payments received
-    total_revenue = Payment.objects.aggregate(Sum('amount_paid'))['amount_paid__sum'] or Decimal('0.00')
-    
-    # Inventory Alerts
-    out_of_stock_count = Product.objects.filter(stock=0).count()
-    low_stock_count = Product.objects.filter(stock__gt=0, stock__lt=10).count()
-    low_stock_products = Product.objects.filter(stock__lt=10).order_by('stock')[:5]
-    
-    # Recent Activities
-    recent_invoices = Invoice.objects.select_related('customer').order_by('-date')[:5]
-    recent_payments = Payment.objects.select_related('invoice__customer').order_by('-payment_date')[:5]
-    
-    # Analytics data (Daily sales for last 30 days)
-    today = timezone.localdate()
-    thirty_days_ago = today - datetime.timedelta(days=30)
-    
-    daily_sales = Invoice.objects.filter(date__date__gte=thirty_days_ago) \
-        .annotate(day=TruncDate('date')) \
-        .values('day') \
-        .annotate(total=Sum('total_amount')) \
-        .order_by('day')
-    
-    sales_labels = [item['day'].strftime('%Y-%m-%d') for item in daily_sales]
-    sales_data = [float(item['total']) for item in daily_sales]
-    
-    context = {
-        'total_customers': total_customers,
-        'total_products': total_products,
-        'total_invoices': total_invoices,
-        'total_revenue': total_revenue,
-        'out_of_stock_count': out_of_stock_count,
-        'low_stock_count': low_stock_count,
-        'low_stock_products': low_stock_products,
-        'recent_invoices': recent_invoices,
-        'recent_payments': recent_payments,
-        'sales_labels': json.dumps(sales_labels),
-        'sales_data': json.dumps(sales_data),
-    }
-    return render(request, 'core/home.html', context)
-from django.http import HttpResponse, JsonResponse
 from django.db import transaction
 from django.db.models import Q, Sum
 from django.db.models.functions import TruncDate
@@ -265,21 +216,44 @@ def invoice_add(request):
             data = json.loads(request.body)
             customer_id = data.get('customer')
             due_date_str = data.get('due_date')
-            subtotal = float(data.get('subtotal', 0))
-            tax_rate = float(data.get('tax_rate', 0))
-            tax_amount = float(data.get('tax_amount', 0))
-            discount_amount = float(data.get('discount_amount', 0))
-            total_amount = float(data.get('total_amount', 0))
             items_data = data.get('items', [])
             
             if not customer_id or not items_data:
                 return JsonResponse({'status': 'error', 'message': 'Missing customer or invoice items.'}, status=400)
             
             customer = get_object_or_404(Customer, id=customer_id)
+            tax_rate = Decimal(str(data.get('tax_rate', 0)))
+            discount_amount = Decimal(str(data.get('discount_amount', 0)))
+            if tax_rate < 0 or tax_rate > 100:
+                return JsonResponse({'status': 'error', 'message': 'Tax rate must be between 0 and 100.'}, status=400)
+            if discount_amount < 0:
+                return JsonResponse({'status': 'error', 'message': 'Discount cannot be negative.'}, status=400)
+
             due_date = None
             if due_date_str:
                 due_date = datetime.datetime.strptime(due_date_str, '%Y-%m-%d').date()
-            
+
+            subtotal = Decimal('0.00')
+            normalized_items = []
+            seen_products = set()
+            for item in items_data:
+                product_id = item.get('product_id')
+                quantity = int(item.get('quantity', 0))
+                if not product_id or quantity < 1:
+                    raise ValueError('Each invoice item needs a product and a positive quantity.')
+                if product_id in seen_products:
+                    raise ValueError('A product can only appear once on an invoice.')
+                seen_products.add(product_id)
+                product = get_object_or_404(Product, id=product_id)
+                if quantity > product.stock:
+                    raise ValueError(f'Not enough stock for {product.name}. Available: {product.stock}.')
+                normalized_items.append((product, quantity))
+                subtotal += product.price * quantity
+
+            if discount_amount > subtotal:
+                return JsonResponse({'status': 'error', 'message': 'Discount cannot exceed the subtotal.'}, status=400)
+            tax_amount = (subtotal * tax_rate / Decimal('100')).quantize(Decimal('0.01'))
+            total_amount = max(Decimal('0.00'), subtotal + tax_amount - discount_amount)
             invoice = Invoice(
                 customer=customer,
                 invoice_number=generate_invoice_number(),
@@ -292,19 +266,12 @@ def invoice_add(request):
             )
             invoice.save()
             
-            for item in items_data:
-                product_id = item.get('product_id')
-                quantity = int(item.get('quantity', 1))
-                price = float(item.get('price'))
-                
-                product = get_object_or_404(Product, id=product_id)
-                
-                # Save item which will trigger stock deduction and total calculation
+            for product, quantity in normalized_items:
                 invoice_item = InvoiceItem(
                     invoice=invoice,
                     product=product,
                     quantity=quantity,
-                    unit_price=price
+                    unit_price=product.price
                 )
                 invoice_item.save()
             
@@ -394,7 +361,9 @@ def payment_add(request, invoice_id):
             payment.invoice = invoice
             payment.payment_date = timezone.now()
             
-            if payment.amount_paid > balance:
+            if payment.amount_paid <= 0:
+                form.add_error('amount_paid', 'Payment must be greater than zero.')
+            elif payment.amount_paid > balance:
                 form.add_error('amount_paid', f"Payment exceeds the remaining balance of ₹{balance}.")
             else:
                 payment.save()
